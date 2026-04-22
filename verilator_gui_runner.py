@@ -170,7 +170,9 @@ class VerilatorApp:
         right_actions.grid(row=0, column=2, sticky="e")
         ttk.Button(right_actions, text="Open output tab", command=lambda: self.notebook.select(self.output_tab)).pack(side="left")
         ttk.Button(right_actions, text="Stop", command=self.stop_process).pack(side="left", padx=(8, 0))
-        self.run_button = ttk.Button(right_actions, text="Run", command=self.run_command)
+        self.run_executable_button = ttk.Button(right_actions, text="Run executable", command=self.run_executable)
+        self.run_executable_button.pack(side="left", padx=(8, 0))
+        self.run_button = ttk.Button(right_actions, text="Build", command=self.run_command)
         self.run_button.pack(side="left", padx=(8, 0))
 
     def _build_project_tab(self) -> None:
@@ -254,7 +256,7 @@ class VerilatorApp:
         ttk.Checkbutton(options, text="Timing enabled", variable=self.timing_var).grid(row=0, column=1, sticky="w")
         ttk.Checkbutton(options, text="Coverage (--coverage)", variable=self.coverage_var).grid(row=1, column=0, sticky="w", pady=(8, 0))
         ttk.Checkbutton(options, text="Disable assert (--no-assert)", variable=self.no_assert_var).grid(row=1, column=1, sticky="w", pady=(8, 0))
-        ttk.Checkbutton(options, text="Run after build", variable=self.run_after_build_var).grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(options, text="Run executable after build", variable=self.run_after_build_var).grid(row=2, column=0, sticky="w", pady=(8, 0))
         ttk.Checkbutton(options, text="Auto-scroll output", variable=self.auto_scroll_var).grid(row=2, column=1, sticky="w", pady=(8, 0))
 
         ttk.Label(options, text="Trace").grid(row=3, column=0, sticky="w", pady=(12, 0))
@@ -292,7 +294,7 @@ class VerilatorApp:
         self.output_tab.columnconfigure(0, weight=1)
         self.output_tab.rowconfigure(1, weight=1)
 
-        preview_frame = ttk.LabelFrame(self.output_tab, text="Generated command", padding=10)
+        preview_frame = ttk.LabelFrame(self.output_tab, text="Generated commands", padding=10)
         preview_frame.grid(row=0, column=0, sticky="nsew")
         preview_frame.columnconfigure(0, weight=1)
         preview_frame.rowconfigure(0, weight=1)
@@ -354,6 +356,8 @@ class VerilatorApp:
             self.exe_var.set("Vsim")
         if workflow == WORKFLOW_CPP and not self.exe_var.get():
             self.exe_var.set("Vsim")
+        run_state = "disabled" if lint else "normal"
+        self.run_executable_button.configure(state=run_state)
 
     def _append_log(self, text: str) -> None:
         self.log.insert(tk.END, text)
@@ -372,11 +376,46 @@ class VerilatorApp:
     def _parse_extra_args(self, raw: str) -> list[str]:
         return shlex.split(raw) if raw.strip() else []
 
-    def _current_executable_path(self) -> str:
-        output_dir = self.mdir_var.get().strip() or "obj_dir"
+    def _expected_executable_path(self) -> Path:
+        output_dir = Path(self.mdir_var.get().strip() or "obj_dir")
         executable = self.exe_var.get().strip() or "Vsim"
         suffix = ".exe" if os.name == "nt" else ""
-        return str(Path(output_dir) / f"{executable}{suffix}")
+        return output_dir / f"{executable}{suffix}"
+
+    def _current_executable_path(self) -> str:
+        found = self._find_built_executable()
+        if found is not None:
+            return str(found)
+        return str(self._expected_executable_path())
+
+    def _find_built_executable(self) -> Path | None:
+        if self.workflow_var.get() == WORKFLOW_LINT:
+            return None
+        expected = self._expected_executable_path()
+        if expected.exists():
+            return expected
+        output_dir = expected.parent
+        if not output_dir.exists() or not output_dir.is_dir():
+            return None
+        candidates: list[Path] = []
+        for entry in output_dir.iterdir():
+            if not entry.is_file():
+                continue
+            if os.name == "nt":
+                if entry.suffix.lower() == ".exe":
+                    candidates.append(entry)
+            else:
+                if os.access(entry, os.X_OK):
+                    candidates.append(entry)
+        if not candidates:
+            return None
+        requested = self.exe_var.get().strip()
+        if requested:
+            for candidate in candidates:
+                if candidate.name == requested or candidate.stem == requested:
+                    return candidate
+        candidates.sort(key=lambda item: item.stat().st_mtime, reverse=True)
+        return candidates[0]
 
     def build_command(self) -> list[str]:
         workflow = self.workflow_var.get()
@@ -446,7 +485,7 @@ class VerilatorApp:
         try:
             command = self.build_command()
             display = self._shell_join(command)
-            if self.workflow_var.get() != WORKFLOW_LINT and self.run_after_build_var.get():
+            if self.workflow_var.get() != WORKFLOW_LINT:
                 run_command = [self._current_executable_path()]
                 run_command.extend(self._parse_extra_args(self.run_args_var.get()))
                 display += "\n\n" + self._shell_join(run_command)
@@ -497,8 +536,9 @@ class VerilatorApp:
 
         self.log.delete("1.0", tk.END)
         self._append_log("$ " + self._shell_join(command) + "\n\n")
-        self.status_var.set("Running")
+        self.status_var.set("Building")
         self.run_button.configure(state="disabled")
+        self.run_executable_button.configure(state="disabled")
 
         def worker() -> None:
             try:
@@ -531,16 +571,27 @@ class VerilatorApp:
         except Exception as exc:
             messagebox.showerror("Stop build", f"Unable to stop the build:\n{exc}")
 
+    def run_executable(self) -> None:
+        if self.workflow_var.get() == WORKFLOW_LINT:
+            self.status_var.set("Lint workflow has no executable")
+            return
+        self.notebook.select(self.output_tab)
+        self._run_executable()
+
     def _run_executable(self) -> None:
-        executable = self._current_executable_path()
-        if not Path(executable).exists():
-            self._append_log(f"\nExecutable not found: {executable}\n")
+        detected = self._find_built_executable()
+        if detected is None:
+            expected = self._expected_executable_path()
+            self._append_log(f"\nNo runnable executable found in {expected.parent}\n")
+            self._append_log(f"Expected executable: {expected}\n")
             self.status_var.set("Executable not found")
             return
 
-        run_command = [executable]
+        run_command = [str(detected)]
         run_command.extend(self._parse_extra_args(self.run_args_var.get()))
         self._append_log("\n$ " + self._shell_join(run_command) + "\n\n")
+        if detected != self._expected_executable_path():
+            self._append_log(f"Using detected executable: {detected}\n\n")
 
         try:
             completed = subprocess.run(run_command, capture_output=True, text=True)
@@ -566,6 +617,7 @@ class VerilatorApp:
             elif kind == "finished":
                 self.running_process = None
                 self.run_button.configure(state="normal")
+                self.run_executable_button.configure(state="normal" if self.workflow_var.get() != WORKFLOW_LINT else "disabled")
                 code = int(payload)
                 if code == 0:
                     self._append_log(f"\nBuild finished successfully with exit code {code}\n")
@@ -578,6 +630,7 @@ class VerilatorApp:
             elif kind == "error":
                 self.running_process = None
                 self.run_button.configure(state="normal")
+                self.run_executable_button.configure(state="normal" if self.workflow_var.get() != WORKFLOW_LINT else "disabled")
                 self._append_log(f"\nUnable to start process: {payload}\n")
                 self.status_var.set("Run error")
 
