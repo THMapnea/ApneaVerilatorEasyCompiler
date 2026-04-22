@@ -199,7 +199,11 @@ class VerilatorApp:
         ttk.Entry(config, textvariable=self.top_var).grid(row=0, column=5, sticky="ew", padx=(6, 0), pady=0)
 
         ttk.Label(config, text="Output directory").grid(row=1, column=0, sticky="w", pady=(10, 0))
-        ttk.Entry(config, textvariable=self.mdir_var).grid(row=1, column=1, sticky="ew", padx=(6, 10), pady=(10, 0))
+        output_dir_frame = ttk.Frame(config)
+        output_dir_frame.grid(row=1, column=1, sticky="ew", padx=(6, 10), pady=(10, 0))
+        output_dir_frame.columnconfigure(0, weight=1)
+        ttk.Entry(output_dir_frame, textvariable=self.mdir_var).grid(row=0, column=0, sticky="ew")
+        ttk.Button(output_dir_frame, text="Browse", command=self.choose_output_directory).grid(row=0, column=1, padx=(6, 0))
         ttk.Label(config, text="Executable name").grid(row=1, column=2, sticky="w", pady=(10, 0))
         ttk.Entry(config, textvariable=self.exe_var).grid(row=1, column=3, sticky="ew", padx=(6, 10), pady=(10, 0))
         ttk.Label(config, text="Build jobs").grid(row=1, column=4, sticky="w", pady=(10, 0))
@@ -375,6 +379,20 @@ class VerilatorApp:
 
     def _parse_extra_args(self, raw: str) -> list[str]:
         return shlex.split(raw) if raw.strip() else []
+
+
+    def choose_output_directory(self) -> None:
+        current = self.mdir_var.get().strip()
+        initial = current
+        if current and not Path(current).is_dir():
+            initial = str(Path(current).parent)
+        if not initial:
+            initial = os.getcwd()
+        selected = filedialog.askdirectory(title="Select output directory", initialdir=initial)
+        if not selected:
+            return
+        self.mdir_var.set(selected)
+        self.refresh_command_preview()
 
     def _expected_executable_path(self) -> Path:
         output_dir = Path(self.mdir_var.get().strip() or "obj_dir")
